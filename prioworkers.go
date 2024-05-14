@@ -6,12 +6,26 @@ type PrioworkersOptions struct {
 	EnforceSpinCntOnHighPrio bool
 }
 
+type State struct {
+	// current state
+	WorkStartChanLen         int
+	WorkEndChanLen           int
+	RunningWorkersPerPrioCnt [100]int
+	WaitingWorkersPerPrioCnt [100]int
+	// all time maximums
+	MaxEverWorkChanLen     int
+	MaxEverRunningSamePrio int
+	MaxEverWaitingSamePrio int
+}
+
 var Options PrioworkersOptions
 
 var workStartChan chan int
 var workEndChan chan int
 var workerChans [100]chan struct{} // a channel for each priority; workers will block on reading from it
 var chanBuffSize int               // size of internal channel buffers;
+var getStateChan chan struct{}
+var stateChan chan State
 
 func Init(chanBuffSize int, options *PrioworkersOptions) {
 	Options = *options
@@ -20,6 +34,8 @@ func Init(chanBuffSize int, options *PrioworkersOptions) {
 	for i := range workerChans {
 		workerChans[i] = make(chan struct{})
 	}
+	getStateChan = make(chan struct{})
+	stateChan = make(chan State)
 	go workerCoordinator()
 }
 
@@ -33,18 +49,20 @@ func WorkEnd(prio int) {
 	workEndChan <- prio
 }
 
+func GetState() State {
+	getStateChan <- struct{}{}
+	return <-stateChan
+}
+
 func workerCoordinator() {
 
-	var prioQueue [100][]chan struct{}
 	var prioRunningCnt [100]int
 	var prioWaitingCnt [100]int
 	var curRunningPrio int
 
-	for i := 0; i < 100; i++ {
-		prioQueue[i] = make([]chan struct{}, 0)
-		prioRunningCnt[i] = 0
-	}
-	curRunningPrio = 0
+	var maxEverWorkChanLen int
+	var maxEverRunningSamePrio int
+	var maxEverWaitingSamePrio int
 
 	for {
 		select {
@@ -64,6 +82,13 @@ func workerCoordinator() {
 				} else {
 					prioWaitingCnt[prio]++
 				}
+			}
+			// update stats
+			if len(workStartChan) > maxEverWorkChanLen {
+				maxEverWorkChanLen = len(workStartChan)
+			}
+			if prioWaitingCnt[prio] > maxEverWaitingSamePrio {
+				maxEverWaitingSamePrio = prioWaitingCnt[prio]
 			}
 
 		// we receive signal that worker with certain prio ended work
@@ -98,6 +123,25 @@ func workerCoordinator() {
 					}
 				}
 			}
+			// update stats
+			if len(workEndChan) > maxEverWorkChanLen {
+				maxEverWorkChanLen = len(workEndChan)
+			}
+			if prioRunningCnt[prio] > maxEverRunningSamePrio {
+				maxEverRunningSamePrio = prioRunningCnt[prio]
+			}
+
+		// we receive signal that a client wants current state
+		case <-getStateChan:
+			state := State{
+				WorkStartChanLen:         len(workStartChan),
+				WorkEndChanLen:           len(workEndChan),
+				RunningWorkersPerPrioCnt: prioRunningCnt,
+				WaitingWorkersPerPrioCnt: prioWaitingCnt,
+				MaxEverRunningSamePrio:   maxEverRunningSamePrio,
+				MaxEverWaitingSamePrio:   maxEverWaitingSamePrio,
+			}
+			stateChan <- state
 
 		}
 	}
