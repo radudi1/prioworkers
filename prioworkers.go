@@ -77,8 +77,6 @@ func WorkEnd(prio int64) {
 				if spinCnt < 1 || prioWaitingCnt.get(i) < spinCnt {
 					spinCnt = prioWaitingCnt.get(i)
 				}
-				// update state
-				curRunningPrio.Store(i)
 				// send signals to workers
 				for j := int64(0); j < spinCnt; j++ {
 					workerChans[i] <- struct{}{}
@@ -86,6 +84,8 @@ func WorkEnd(prio int64) {
 				// stop searching for lower priorities because we already do work at higher prio
 				break
 			}
+			// update state
+			curRunningPrio.Store(max(i, int64(0)))
 		}
 	}
 }
