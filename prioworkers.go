@@ -70,7 +70,8 @@ func WorkEnd(prio int64) {
 	if prio == curRunningPrio.Load() && prioWaitingCnt.get(prio) > 0 {
 		workerChans[prio] <- struct{}{}
 	} else { // there's no work being done at current or higher prio so we search in our queue for workers at lower priorities that are waiting
-		for i := int64(numPriorities) - 1; i >= 0; i-- { // traverse priority queue downwards
+		var i int64
+		for i = int64(numPriorities) - 1; i >= 0; i-- { // traverse priority queue downwards
 			if prioWaitingCnt.get(i) > 0 { // we find workers waiting at this prio so we unlock all of them
 				// set spinCnt to be the number of threads we have to spin; we check that it's within limits
 				spinCnt := Options.LowPrioSpinCnt
@@ -84,9 +85,9 @@ func WorkEnd(prio int64) {
 				// stop searching for lower priorities because we already do work at higher prio
 				break
 			}
-			// update state
-			curRunningPrio.Store(max(i, int64(0)))
 		}
+		// update state
+		curRunningPrio.Store(max(i, int64(0)))
 	}
 }
 
