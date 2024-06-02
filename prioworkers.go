@@ -40,9 +40,11 @@ func Init(options *PrioworkersOptions) {
 	// make conditions
 	for i := 0; i < numPriorities; i++ {
 		workerConds[i] = sync.NewCond(new(sync.Mutex))
+		workerConds[i].L.Lock()
 	}
 	// spin queueTraversalWorker
 	queueTraversalWorkerCond = sync.NewCond(new(sync.Mutex))
+	queueTraversalWorkerCond.L.Lock()
 	go queueTraversalWorker()
 }
 
