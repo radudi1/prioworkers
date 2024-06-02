@@ -1,6 +1,7 @@
 package prioworkers
 
 import (
+	"sync"
 	"sync/atomic"
 )
 
@@ -31,13 +32,18 @@ type prioCounters struct {
 var prioRunningCnt prioCounters
 var prioWaitingCnt prioCounters
 var curRunningPrio atomic.Int64
-var workerChans [numPriorities]chan struct{}
+var workerConds [numPriorities]*sync.Cond
+var queueTraversalWorkerCond *sync.Cond
 
 func Init(options *PrioworkersOptions) {
 	Options = *options
+	// make conditions
 	for i := 0; i < numPriorities; i++ {
-		workerChans[i] = make(chan struct{})
+		workerConds[i] = sync.NewCond(new(sync.Mutex))
 	}
+	// spin queueTraversalWorker
+	queueTraversalWorkerCond = sync.NewCond(new(sync.Mutex))
+	go queueTraversalWorker()
 }
 
 func WorkStart(prio int64) int64 {
@@ -51,7 +57,7 @@ func WorkStart(prio int64) int64 {
 			prioRunningCnt.inc(prio)
 		} else {
 			prioWaitingCnt.inc(prio)
-			<-workerChans[prio] // block waiting for other workers to finish
+			workerConds[prio].Wait() // block waiting for other workers to finish
 			// worker can now start and update state accordingly
 			prioWaitingCnt.dec(prio)
 			prioRunningCnt.inc(prio)
@@ -63,31 +69,16 @@ func WorkStart(prio int64) int64 {
 func WorkEnd(prio int64) {
 	prioRunningCnt.dec(prio)
 	// if current running priority is higher than this worker priority there's nothing else to do
+	// because all lower prios should continue to be blocked waiting for higher prio workers to finish
 	if curRunningPrio.Load() > prio {
 		return
 	}
 	// if current running priority is equal to this worker and there are still workers with the same priority waiting we should spin another worker with the same priority
+	// for each worker that finished we should spin exactly one worker in its place
 	if prio == curRunningPrio.Load() && prioWaitingCnt.get(prio) > 0 {
-		workerChans[prio] <- struct{}{}
+		workerConds[prio].Signal()
 	} else { // there's no work being done at current or higher prio so we search in our queue for workers at lower priorities that are waiting
-		var i int64
-		for i = int64(numPriorities) - 1; i >= 0; i-- { // traverse priority queue downwards
-			if prioWaitingCnt.get(i) > 0 { // we find workers waiting at this prio so we unlock all of them
-				// set spinCnt to be the number of threads we have to spin; we check that it's within limits
-				spinCnt := Options.LowPrioSpinCnt
-				if spinCnt < 1 || prioWaitingCnt.get(i) < spinCnt {
-					spinCnt = prioWaitingCnt.get(i)
-				}
-				// send signals to workers
-				for j := int64(0); j < spinCnt; j++ {
-					workerChans[i] <- struct{}{}
-				}
-				// stop searching for lower priorities because we already do work at higher prio
-				break
-			}
-		}
-		// update state
-		curRunningPrio.Store(max(i, int64(0)))
+		queueTraversalWorkerCond.Signal()
 	}
 }
 
@@ -101,6 +92,34 @@ func GetState() State {
 		state.WaitingWorkersPerPrioCnt[i] = prioWaitingCnt.get(i)
 	}
 	return state
+}
+
+func queueTraversalWorker() {
+	var i int64
+	for {
+		queueTraversalWorkerCond.Wait()
+		for i = int64(numPriorities) - 1; i >= 0; i-- { // traverse priority queue downwards
+			if prioWaitingCnt.get(i) > 0 { // we find workers waiting at this prio so we unlock all of them
+				// set spinCnt to be the number of threads we have to spin; we check that it's within limits
+				spinCnt := Options.LowPrioSpinCnt
+				if spinCnt < 1 { // LowPrioSpinCnt is set to 0 or less which means that there's no limit - we spin all waiting workers
+					spinCnt = prioWaitingCnt.get(i)
+				} else {
+					spinCnt -= prioRunningCnt.get(i)              // if there are any running workers at same prio we try to stay within LowPrioSpinCnt limits
+					spinCnt = min(spinCnt, prioWaitingCnt.get(i)) // we can't spin more workers than how many are actually waiting
+				}
+				// send signals to workers
+				for j := int64(0); j < spinCnt; j++ {
+					workerConds[i].Signal()
+				}
+				// stop searching for lower priorities because we already do work at higher prio
+				break
+			}
+		}
+		// update state
+		curRunningPrio.Store(max(i, int64(0)))
+	}
+
 }
 
 func (counters *prioCounters) inc(prio int64) {
